@@ -32,6 +32,19 @@ def scan(path: str) -> pl.LazyFrame:
     return pl.scan_parquet(resolve_parquet(path))
 
 
+def encode_binary(df: pl.DataFrame) -> pl.DataFrame:
+    """Cot Binary (vd UUID raw cua MSSQL) -> hex. JSON/Excel/CSV deu khong xu ly
+    duoc bytes: FastAPI .decode() -> 500, xlsxwriter/write_csv -> TypeError."""
+    bins = [n for n, t in df.schema.items() if t == pl.Binary]
+    if bins:
+        df = df.with_columns([pl.col(n).bin.encode("hex").alias(n) for n in bins])
+    return df
+
+
+def rows_jsonable(df: pl.DataFrame) -> list[dict]:
+    return encode_binary(df).to_dicts()
+
+
 # ---------------------------------------------------------------- browse
 def describe_file(path: str | Path, source: str = "disk") -> dict:
     """Mo ta 1 file parquet de hien trong danh sach. source: 'disk' | 'upload'."""
@@ -328,7 +341,7 @@ def query_data(
     df = lf.slice(offset, page_size).collect()
 
     # Serialize: everything to python natives, stringify exotic types
-    rows = df.to_dicts()
+    rows = rows_jsonable(df)
     dtypes = {n: str(t) for n, t in df.schema.items()}
     total_pages = (total_rows + page_size - 1) // page_size if total_rows else 0
     return {
@@ -493,7 +506,7 @@ def compare_data(
             df = df.drop([f"__{k}_coalesced" for k in coalesced_keys])
         for c in non_key_common:
             df = df.with_columns(pl.lit(None).alias(f"{c}_b"))
-        for r in df.to_dicts():
+        for r in rows_jsonable(df):
             r["_status"] = "only_in_a"
             r["_cell_diff"] = {}
             rows.append(r)
@@ -508,7 +521,7 @@ def compare_data(
         df = only_b_q.slice(offset, take).collect(engine="streaming")
         if coalesce_null_keys:
             df = df.drop([f"__{k}_coalesced" for k in coalesced_keys])
-        dicts = df.to_dicts()
+        dicts = rows_jsonable(df)
         for r in dicts:
             display = {}
             if coalesce_null_keys:
@@ -539,7 +552,7 @@ def compare_data(
                 [f"__{k}_coalesced" for k in coalesced_keys]
                 + [f"{k}_b" for k in coalesced_keys if f"{k}_b" in df.columns]
             )
-        for r in df.to_dicts():
+        for r in rows_jsonable(df):
             cell_diff = {}
             for c in non_key_common:
                 va, vb = r.get(c), r.get(f"{c}_b")
@@ -618,7 +631,7 @@ def export_data(
         offset = (max(1, page) - 1) * page_size
         lf = lf.slice(offset, page_size)
 
-    df = lf.collect()
+    df = encode_binary(lf.collect())
 
     buf = BytesIO()
     if format.lower() == "xlsx":
@@ -663,7 +676,7 @@ def distinct_values(
         .slice(0, limit)
         .collect()
     )
-    rows = [{**{c: r[c] for c in columns}, "count": r["len"]} for r in df.to_dicts()]
+    rows = [{**{c: r[c] for c in columns}, "count": r["len"]} for r in rows_jsonable(df)]
     return {
         "path": str(p),
         "columns": columns,
